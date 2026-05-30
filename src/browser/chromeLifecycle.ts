@@ -471,6 +471,10 @@ function createSessionBoundChromeClient(browser: ChromeClient, sessionId: string
 
   return {
     ...browser,
+    // Raw `send` here is the browser-level send (not session-bound), so callers
+    // that issue Target.* via `send` must pass this page session id explicitly to
+    // stay scoped to this tab (e.g. Deep Research OOPIF auto-attach).
+    oraclePageSessionId: sessionId,
     Network: bindDomain("Network"),
     Page: bindDomain("Page"),
     Runtime: bindDomain("Runtime"),

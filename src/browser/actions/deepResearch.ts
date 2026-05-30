@@ -386,10 +386,18 @@ async function readDeepResearchTargetResult(
       params?: Record<string, unknown>,
       sessionId?: string,
     ) => Promise<unknown>;
+    oraclePageSessionId?: string;
   };
   if (typeof rawClient.send !== "function") {
     return null;
   }
+
+  // On the browser-WSEndpoint path, `client` is a session-bound wrapper whose
+  // domain methods target the page session but whose raw `send` is the
+  // browser-level send. We must therefore pass the page session id explicitly so
+  // Target.setAutoAttach binds to THIS page (not the whole browser). For a direct
+  // tab client this is undefined and `send` already defaults to the page session.
+  const pageSessionId = rawClient.oraclePageSessionId;
 
   const sessionIds = new Set<string>();
   const ownedSessionIds = new Set<string>();
@@ -418,11 +426,15 @@ async function readDeepResearchTargetResult(
     // saved into the current session (cross-tab leak). Only auto-attached,
     // page-scoped sessions are treated as belonging to this run.
     await rawClient
-      .send("Target.setAutoAttach", {
-        autoAttach: true,
-        waitForDebuggerOnStart: false,
-        flatten: true,
-      })
+      .send(
+        "Target.setAutoAttach",
+        {
+          autoAttach: true,
+          waitForDebuggerOnStart: false,
+          flatten: true,
+        },
+        pageSessionId,
+      )
       .catch(() => undefined);
     await delay(100);
 
@@ -438,11 +450,15 @@ async function readDeepResearchTargetResult(
     return null;
   } finally {
     await rawClient
-      .send("Target.setAutoAttach", {
-        autoAttach: false,
-        waitForDebuggerOnStart: false,
-        flatten: true,
-      })
+      .send(
+        "Target.setAutoAttach",
+        {
+          autoAttach: false,
+          waitForDebuggerOnStart: false,
+          flatten: true,
+        },
+        pageSessionId,
+      )
       .catch(() => undefined);
     await Promise.all(
       Array.from(ownedSessionIds, (sessionId) =>

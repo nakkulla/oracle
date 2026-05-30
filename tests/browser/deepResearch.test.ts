@@ -541,6 +541,106 @@ describe("waitForDeepResearchCompletion", () => {
     }
   });
 
+  it("binds Target.setAutoAttach to the page session on a session-bound wrapper client", async () => {
+    // On the browser-WSEndpoint path, `client` is a session-bound wrapper whose
+    // raw `send` is browser-level (only domain methods are session-bound). If
+    // auto-attach is issued without the page session id, it attaches browser-wide
+    // and a foreign completed Deep Research tab leaks into this session. The fix
+    // passes `oraclePageSessionId`; this test asserts every setAutoAttach call is
+    // bound to that page session.
+    mockRuntime.evaluate.mockResolvedValue({
+      result: {
+        value: {
+          finished: false,
+          stopVisible: false,
+          textLength: 0,
+          hasIframe: true,
+          hasActiveScopedResearch: false,
+        },
+      },
+    });
+
+    const setAutoAttachSessions: Array<string | undefined> = [];
+    const listeners = new Map<string, (params: unknown, sessionId?: string) => void>();
+    const deepResearchUrl =
+      "https://connector_openai_deep_research.web-sandbox.oaiusercontent.com/";
+
+    const mockClient = {
+      // Marks the session-bound wrapper (createSessionBoundChromeClient).
+      oraclePageSessionId: "page-session",
+      on: vi.fn((event: string, listener: (params: unknown, sessionId?: string) => void) => {
+        listeners.set(event, listener);
+      }),
+      removeListener: vi.fn(),
+      send: vi.fn(async (method: string, params?: unknown, sessionId?: string) => {
+        if (method === "Target.setAutoAttach" && (params as { autoAttach?: boolean })?.autoAttach) {
+          setAutoAttachSessions.push(sessionId);
+          // Page-session-scoped: only this page's OOPIF (in progress). If the call
+          // were browser-wide (sessionId !== page-session), a foreign completed
+          // report would also attach — which the assertions below forbid.
+          listeners.get("Target.attachedToTarget")?.({
+            sessionId: "current-session",
+            targetInfo: { type: "iframe", url: deepResearchUrl },
+          });
+          if (sessionId !== "page-session") {
+            listeners.get("Target.attachedToTarget")?.({
+              sessionId: "foreign-session",
+              targetInfo: { type: "iframe", url: deepResearchUrl },
+            });
+          }
+          return {};
+        }
+        if (method === "Page.getFrameTree") {
+          return {
+            frameTree: { frame: { id: `${sessionId}-frame`, name: "root", url: deepResearchUrl } },
+          };
+        }
+        if (method === "Page.createIsolatedWorld") {
+          return { executionContextId: sessionId === "foreign-session" ? 99 : 50 };
+        }
+        if (method === "Runtime.evaluate" && sessionId === "foreign-session") {
+          return {
+            result: {
+              value: { completed: true, inProgress: false, textLength: 80, text: "FOREIGN_REPORT" },
+            },
+          };
+        }
+        if (method === "Runtime.evaluate" && sessionId === "current-session") {
+          return {
+            result: {
+              value: { completed: false, inProgress: true, textLength: 10, text: undefined },
+            },
+          };
+        }
+        return {};
+      }),
+    };
+
+    let nowCalls = 0;
+    const dateNowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      nowCalls += 1;
+      return nowCalls < 8 ? 1_000 : 2_000;
+    });
+
+    try {
+      await expect(
+        waitForDeepResearchCompletion(
+          mockRuntime as never,
+          mockLogger,
+          100,
+          1,
+          undefined,
+          mockClient as never,
+        ),
+      ).rejects.toThrow(/did not complete/);
+      // Every auto-attach was bound to the page session — never browser-wide.
+      expect(setAutoAttachSessions.length).toBeGreaterThan(0);
+      expect(setAutoAttachSessions.every((s) => s === "page-session")).toBe(true);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
   it("returns an OOPIF report via the target path during a scoped run when the main DOM has no assistant turn", async () => {
     // Regression: ChatGPT renders the Deep Research report inside an
     // out-of-process iframe that is invisible to the main page's frame tree.
