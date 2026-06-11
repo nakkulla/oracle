@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Browser: surface visible ChatGPT rate-limit, temporary-unavailable, and authentication/challenge warnings in assistant-timeout errors and session metadata instead of reporting only a generic timeout. Thanks @derekszen!
 - Browser: verify ChatGPT login through the cookie-authenticated `/api/auth/session` endpoint before falling back to the legacy `/backend-api/me` probe and strong app-shell signals, avoiding false “session not detected” failures when the legacy endpoint requires bearer auth. Fixes #241. Thanks @hexsprite and @orbitingflea!
 - Browser: select ChatGPT “Welcome back” accounts only by exact configured email, keep the address out of logs, and fail closed on ambiguous saved accounts. Thanks @derekszen!
 

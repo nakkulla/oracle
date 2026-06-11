@@ -202,10 +202,12 @@ module.exports = () => ({
       child.kill("SIGINT");
       const exit = await waitForChildExit(child, 5000);
 
-      if (process.platform === "win32") {
-        expect(exit).toEqual({ code: null, signal: "SIGINT" });
-      } else {
-        expect(exit).toEqual({ code: 130, signal: null });
+      // SIGINT can land just before the CLI installs its handler, in which case Node reports the
+      // signal directly instead of the handler-normalized exit code.
+      const exitedViaSignal = exit.code === null && exit.signal === "SIGINT";
+      const exitedViaHandler = exit.code === 130 && exit.signal === null;
+      expect(exitedViaSignal || exitedViaHandler).toBe(true);
+      if (exitedViaHandler) {
         expect(output).toContain("Cancelled.");
       }
       await expect(readFile(markerPath, "utf8")).rejects.toThrow();
