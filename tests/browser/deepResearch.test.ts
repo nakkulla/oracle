@@ -913,7 +913,9 @@ describe("waitForDeepResearchCompletion", () => {
         }
         if (method === "Page.getFrameTree") {
           return {
-            frameTree: { frame: { id: `${sessionId}-frame`, name: "root", url: deepResearchUrl } },
+            frameTree: {
+              frame: { id: `${sessionId}-frame`, name: "root", url: deepResearchUrl },
+            },
           };
         }
         if (method === "Page.createIsolatedWorld") {
@@ -968,6 +970,102 @@ describe("waitForDeepResearchCompletion", () => {
     expect(result.text).toBe("CURRENT_REPORT https://example.com/current");
     expect(evaluatedSessions).toContain("old-session");
     expect(evaluatedSessions).toContain("current-session");
+  });
+
+  it("scopes reattached OOPIF reports to their owning conversation turn", async () => {
+    mockRuntime.evaluate.mockResolvedValue({
+      result: {
+        value: {
+          finished: false,
+          stopVisible: false,
+          textLength: 0,
+          hasIframe: true,
+          hasActiveScopedResearch: false,
+        },
+      },
+    });
+
+    const listeners = new Map<string, (params: unknown, sessionId?: string) => void>();
+    const deepResearchUrl =
+      "https://connector_openai_deep_research.web-sandbox.oaiusercontent.com/";
+    const mockClient = {
+      oraclePageSessionId: "page-session",
+      on: vi.fn((event: string, listener: (params: unknown, sessionId?: string) => void) => {
+        listeners.set(event, listener);
+      }),
+      removeListener: vi.fn(),
+      send: vi.fn(async (method: string, params?: unknown, sessionId?: string) => {
+        if (method === "Target.setAutoAttach" && (params as { autoAttach?: boolean })?.autoAttach) {
+          // Emit the current report first so target order alone would incorrectly
+          // let the later stale completion win.
+          listeners.get("Target.attachedToTarget")?.(
+            {
+              sessionId: "current-session",
+              targetInfo: { targetId: "current-target", type: "iframe", url: deepResearchUrl },
+            },
+            "page-session",
+          );
+          listeners.get("Target.attachedToTarget")?.(
+            {
+              sessionId: "old-session",
+              targetInfo: { targetId: "old-target", type: "iframe", url: deepResearchUrl },
+            },
+            "page-session",
+          );
+          return {};
+        }
+        if (method === "Page.getFrameTree") {
+          return {
+            frameTree: { frame: { id: `${sessionId}-frame`, name: "root", url: deepResearchUrl } },
+          };
+        }
+        if (method === "DOM.getFrameOwner") {
+          const frameId = (params as { frameId?: string }).frameId;
+          return { backendNodeId: frameId === "current-session-frame" ? 20 : 10 };
+        }
+        if (method === "DOM.resolveNode") {
+          const backendNodeId = (params as { backendNodeId?: number }).backendNodeId;
+          return { object: { objectId: backendNodeId === 20 ? "current-owner" : "old-owner" } };
+        }
+        if (method === "Runtime.callFunctionOn" && sessionId === "page-session") {
+          const objectId = (params as { objectId?: string }).objectId;
+          return { result: { value: objectId === "current-owner" ? 2 : 0 } };
+        }
+        if (method === "Runtime.evaluate" && sessionId) {
+          return {
+            result: {
+              value: {
+                completed: true,
+                inProgress: false,
+                textLength: 80,
+                text:
+                  sessionId === "current-session"
+                    ? "CURRENT_REPORT https://example.com/current"
+                    : "OLD_REPORT https://example.com/old",
+              },
+            },
+          };
+        }
+        return {};
+      }),
+    };
+
+    const result = await waitForDeepResearchCompletion(
+      mockRuntime as never,
+      mockLogger,
+      60_000,
+      1,
+      undefined,
+      mockClient as never,
+      { requireScopedTargetOwner: true },
+    );
+
+    expect(result.text).toBe("CURRENT_REPORT https://example.com/current");
+    expect(mockClient.send).toHaveBeenCalledWith(
+      "DOM.getFrameOwner",
+      { frameId: "current-session-frame" },
+      "page-session",
+    );
   });
 
   it("prefers a completed page target over an earlier in-progress one", async () => {
@@ -1059,6 +1157,78 @@ describe("waitForDeepResearchCompletion", () => {
     } finally {
       dateNowSpy.mockRestore();
     }
+  });
+
+  it.each([
+    ["empty", { completed: false, inProgress: false, textLength: 0 }],
+    ["in-progress", { completed: false, inProgress: true, textLength: 12 }],
+  ])("does not let a later %s target mask a completed report", async (_label, laterStatus) => {
+    mockRuntime.evaluate.mockResolvedValue({
+      result: {
+        value: {
+          finished: false,
+          stopVisible: false,
+          textLength: 0,
+          hasIframe: true,
+          hasActiveScopedResearch: false,
+        },
+      },
+    });
+
+    const listeners = new Map<string, (params: unknown, sessionId?: string) => void>();
+    const deepResearchUrl =
+      "https://connector_openai_deep_research.web-sandbox.oaiusercontent.com/";
+    const mockClient = {
+      on: vi.fn((event: string, listener: (params: unknown, sessionId?: string) => void) => {
+        listeners.set(event, listener);
+      }),
+      removeListener: vi.fn(),
+      send: vi.fn(async (method: string, params?: unknown, sessionId?: string) => {
+        if (method === "Target.setAutoAttach" && (params as { autoAttach?: boolean })?.autoAttach) {
+          listeners.get("Target.attachedToTarget")?.({
+            sessionId: "complete-session",
+            targetInfo: { targetId: "complete-target", type: "iframe", url: deepResearchUrl },
+          });
+          listeners.get("Target.attachedToTarget")?.({
+            sessionId: "empty-session",
+            targetInfo: { targetId: "empty-target", type: "iframe", url: deepResearchUrl },
+          });
+          return {};
+        }
+        if (method === "Page.getFrameTree") {
+          return {
+            frameTree: { frame: { id: `${sessionId}-frame`, name: "root", url: deepResearchUrl } },
+          };
+        }
+        if (method === "Runtime.evaluate" && sessionId === "complete-session") {
+          return {
+            result: {
+              value: {
+                completed: true,
+                inProgress: false,
+                textLength: 80,
+                text: "REPORT_OK https://example.com/report",
+              },
+            },
+          };
+        }
+        if (method === "Runtime.evaluate" && sessionId === "empty-session") {
+          return { result: { value: laterStatus } };
+        }
+        return {};
+      }),
+    };
+
+    const result = await waitForDeepResearchCompletion(
+      mockRuntime as never,
+      mockLogger,
+      60_000,
+      1,
+      undefined,
+      mockClient as never,
+    );
+
+    expect(result.text).toBe("REPORT_OK https://example.com/report");
   });
 
   it("falls back to a completed in-page frame when the target read is only in-progress", async () => {

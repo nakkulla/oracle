@@ -198,6 +198,9 @@ describe("resumeBrowserSession", () => {
       2,
       expect.any(Object),
       expect.any(Object),
+      {
+        requireScopedTargetOwner: true,
+      },
     );
     expect(waitForAssistantResponse).not.toHaveBeenCalled();
     expect(captureAssistantMarkdown).not.toHaveBeenCalled();

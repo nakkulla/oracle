@@ -170,7 +170,9 @@ export async function resumeBrowserSession(
       const waitForDeepResearch =
         deps.waitForDeepResearchCompletion ?? waitForDeepResearchCompletion;
       const researchResult = await withTimeout(
-        waitForDeepResearch(Runtime, logger, timeoutMs, minTurnIndex ?? undefined, Page, client),
+        waitForDeepResearch(Runtime, logger, timeoutMs, minTurnIndex ?? undefined, Page, client, {
+          requireScopedTargetOwner: true,
+        }),
         timeoutMs + 5_000,
         "Reattach Deep Research response timed out",
       );
@@ -365,6 +367,9 @@ async function resumeBrowserSessionViaNewChrome(
       minTurnIndex ?? undefined,
       Page,
       client,
+      {
+        requireScopedTargetOwner: true,
+      },
     );
     await cleanup();
     return {
