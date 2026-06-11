@@ -332,10 +332,14 @@ describe("ensureLoggedIn", () => {
   async function runLoginProbeForLabels(
     labels: string[],
     options: {
-      fetchStatus?: number;
-      fetchStatuses?: number[];
-      fetchBody?: string;
-      fetchBodies?: string[];
+      backendStatus?: number;
+      backendStatuses?: number[];
+      backendBody?: string;
+      backendBodies?: string[];
+      sessionStatus?: number;
+      sessionStatuses?: number[];
+      sessionBody?: unknown;
+      sessionBodies?: unknown[];
       pathname?: string;
       composerVisible?: boolean;
       appSignal?: "profile" | "history" | "model" | null;
@@ -343,10 +347,14 @@ describe("ensureLoggedIn", () => {
     } = {},
   ) {
     const {
-      fetchStatus = 200,
-      fetchStatuses,
-      fetchBody = "",
-      fetchBodies,
+      backendStatus = 200,
+      backendStatuses,
+      backendBody = "",
+      backendBodies,
+      sessionStatus = 200,
+      sessionStatuses,
+      sessionBody = { user: { id: "test-user" }, accessToken: "do-not-expose" },
+      sessionBodies,
       pathname = "/",
       composerVisible = false,
       appSignal = null,
@@ -404,13 +412,21 @@ describe("ensureLoggedIn", () => {
     const window = {
       getComputedStyle: vi.fn(() => ({ display: "block", visibility: "visible" })),
     };
-    const statuses = [...(fetchStatuses ?? [fetchStatus])];
-    const bodies = [...(fetchBodies ?? [fetchBody])];
-    const fetch = vi.fn().mockImplementation(() => {
-      const status = statuses.length > 1 ? statuses.shift() : statuses[0];
-      const body = bodies.length > 1 ? bodies.shift() : bodies[0];
+    const backendStatusQueue = [...(backendStatuses ?? [backendStatus])];
+    const backendBodyQueue = [...(backendBodies ?? [backendBody])];
+    const sessionStatusQueue = [...(sessionStatuses ?? [sessionStatus])];
+    const sessionBodyQueue = [...(sessionBodies ?? [sessionBody])];
+    const next = <T>(queue: T[]): T | undefined => (queue.length > 1 ? queue.shift() : queue[0]);
+    const fetch = vi.fn().mockImplementation((url: string) => {
+      const sessionRequest = url === "/api/auth/session";
+      const status = next(sessionRequest ? sessionStatusQueue : backendStatusQueue);
+      const body = next(sessionRequest ? sessionBodyQueue : backendBodyQueue);
       return Promise.resolve({
         status,
+        json: vi.fn().mockImplementation(async () => {
+          if (body instanceof Error) throw body;
+          return body;
+        }),
         clone: () => ({ text: vi.fn().mockResolvedValue(body) }),
       });
     });
@@ -429,7 +445,14 @@ describe("ensureLoggedIn", () => {
       HTMLElement: typeof FakeHTMLElement,
       fetch: unknown,
       location: unknown,
-    ) => Promise<{ ok: boolean; domLoginCta: boolean; status: number }>;
+    ) => Promise<{
+      ok: boolean;
+      domLoginCta: boolean;
+      status: number;
+      backendStatus: number | null;
+      sessionAuthenticated: boolean;
+      sessionResolved: boolean;
+    }>;
 
     return evaluate(document, window, FakeHTMLElement, fetch, location);
   }
@@ -463,96 +486,129 @@ describe("ensureLoggedIn", () => {
     });
   });
 
-  test("accepts a blocked backend probe when authenticated app DOM is visible", async () => {
+  test("accepts a valid cookie-authenticated session without consulting the legacy probe", async () => {
     await expect(
       runLoginProbeForLabels([], {
-        fetchStatus: 429,
-        composerVisible: true,
-        appSignal: "profile",
+        backendStatus: 401,
       }),
     ).resolves.toMatchObject({
       ok: true,
-      status: 429,
-      appAuthenticated: true,
+      status: 200,
+      backendStatus: null,
+      sessionAuthenticated: true,
+      sessionResolved: true,
       domLoginCta: false,
     });
   });
 
-  test("accepts plain unauthorized backend responses with authenticated app DOM", async () => {
+  test("falls back to authenticated app DOM when the session and legacy probes are unavailable", async () => {
     await expect(
       runLoginProbeForLabels([], {
-        fetchStatus: 401,
+        sessionStatus: 503,
+        backendStatus: 401,
         composerVisible: true,
         appSignal: "profile",
       }),
     ).resolves.toMatchObject({
       ok: true,
-      status: 401,
+      status: 503,
+      backendStatus: 401,
+      sessionAuthenticated: false,
+      sessionResolved: false,
       appAuthenticated: true,
     });
   });
 
-  test("retries transient unauthorized backend responses before failing", async () => {
+  test("retries a transient session failure and accepts the resolved user", async () => {
     await expect(
       runLoginProbeForLabels([], {
-        fetchStatuses: [401, 200],
-        composerVisible: true,
-        appSignal: "profile",
+        sessionStatuses: [503, 200],
+        sessionBodies: [{}, { user: { id: "test-user" }, accessToken: "do-not-expose" }],
+        backendStatus: 401,
         probeTimeoutMs: 500,
       }),
     ).resolves.toMatchObject({
       ok: true,
       status: 200,
-      appAuthenticated: true,
+      backendStatus: null,
+      sessionAuthenticated: true,
+      sessionResolved: true,
     });
   });
 
-  test("does not accept blocked backend probe with only a model pill", async () => {
+  test("does not accept unavailable probes with only a model pill", async () => {
     await expect(
       runLoginProbeForLabels([], {
-        fetchStatus: 401,
+        sessionStatus: 503,
+        backendStatus: 401,
         composerVisible: true,
         appSignal: "model",
       }),
     ).resolves.toMatchObject({
       ok: false,
-      status: 401,
+      status: 503,
+      backendStatus: 401,
       appAuthenticated: false,
     });
   });
 
-  test("does not accept blocked backend probe with only a composer", async () => {
+  test("does not accept unavailable probes with only a composer", async () => {
     await expect(
       runLoginProbeForLabels([], {
-        fetchStatus: 401,
+        sessionStatus: 503,
+        backendStatus: 401,
         composerVisible: true,
       }),
     ).resolves.toMatchObject({
       ok: false,
-      status: 401,
+      status: 503,
+      backendStatus: 401,
       appAuthenticated: false,
     });
   });
 
-  test("accepts plain forbidden backend responses with authenticated app DOM", async () => {
+  test("treats a resolved session without a user as logged out despite stale app DOM", async () => {
     await expect(
       runLoginProbeForLabels([], {
-        fetchStatus: 403,
+        sessionBody: {},
+        backendStatus: 200,
         composerVisible: true,
         appSignal: "profile",
       }),
     ).resolves.toMatchObject({
-      ok: true,
-      status: 403,
+      ok: false,
+      status: 200,
+      backendStatus: null,
       cfBlocked: false,
+      sessionAuthenticated: false,
+      sessionResolved: true,
       appAuthenticated: true,
     });
+  });
+
+  test("keeps plain session 401/403 responses authoritative", async () => {
+    for (const sessionStatus of [401, 403]) {
+      await expect(
+        runLoginProbeForLabels([], {
+          sessionStatus,
+          backendStatus: 200,
+          composerVisible: true,
+          appSignal: "profile",
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        status: sessionStatus,
+        backendStatus: null,
+        sessionAuthenticated: false,
+        sessionResolved: false,
+        appAuthenticated: true,
+      });
+    }
   });
 
   test("keeps auth pages and visible login CTAs authoritative", async () => {
     await expect(
       runLoginProbeForLabels([], {
-        fetchStatus: 401,
         pathname: "/auth/login",
         composerVisible: true,
         appSignal: "profile",
@@ -565,7 +621,6 @@ describe("ensureLoggedIn", () => {
 
     await expect(
       runLoginProbeForLabels(["Log in"], {
-        fetchStatus: 401,
         composerVisible: true,
         appSignal: "history",
       }),
@@ -579,33 +634,57 @@ describe("ensureLoggedIn", () => {
   test("detects Cloudflare-blocked backend probes and falls back to app DOM", async () => {
     await expect(
       runLoginProbeForLabels([], {
-        fetchStatus: 403,
-        fetchBody: "<html><body>cf-mitigated challenge from Cloudflare</body></html>",
+        sessionStatus: 503,
+        backendStatus: 403,
+        backendBody: "<html><body>cf-mitigated challenge from Cloudflare</body></html>",
         composerVisible: true,
         appSignal: "profile",
       }),
     ).resolves.toMatchObject({
       ok: true,
-      status: 403,
+      status: 503,
+      backendStatus: 403,
       cfBlocked: true,
       appAuthenticated: true,
     });
   });
 
-  test("accepts a later unauthorized response when authenticated app DOM remains visible", async () => {
+  test("does not expose session response fields in the probe result", async () => {
+    const result = await runLoginProbeForLabels([], {
+      sessionBody: {
+        user: { id: "test-user", email: "private@example.test" },
+        accessToken: "secret-access-token",
+        sessionToken: "secret-session-token",
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      sessionAuthenticated: true,
+      sessionResolved: true,
+    });
+    expect(JSON.stringify(result)).not.toContain("private@example.test");
+    expect(JSON.stringify(result)).not.toContain("secret-access-token");
+    expect(JSON.stringify(result)).not.toContain("secret-session-token");
+  });
+
+  test("does not keep stale Cloudflare state after the session resolves logged out", async () => {
     await expect(
       runLoginProbeForLabels([], {
-        fetchStatuses: [403, 401],
-        fetchBodies: ["<html><body>cf-mitigated challenge from Cloudflare</body></html>", ""],
+        sessionStatuses: [503, 200],
+        sessionBodies: [{}, {}],
+        backendStatus: 403,
+        backendBody: "<html><body>cf-mitigated challenge from Cloudflare</body></html>",
         composerVisible: true,
-        appSignal: "profile",
         probeTimeoutMs: 500,
       }),
     ).resolves.toMatchObject({
-      ok: true,
-      status: 401,
+      ok: false,
+      status: 200,
+      backendStatus: null,
       cfBlocked: false,
-      appAuthenticated: true,
+      sessionAuthenticated: false,
+      sessionResolved: true,
     });
   });
 

@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Browser: verify ChatGPT login through the cookie-authenticated `/api/auth/session` endpoint before falling back to the legacy `/backend-api/me` probe and strong app-shell signals, avoiding false “session not detected” failures when the legacy endpoint requires bearer auth. Fixes #241. Thanks @hexsprite and @orbitingflea!
 - Browser: select ChatGPT “Welcome back” accounts only by exact configured email, keep the address out of logs, and fail closed on ambiguous saved accounts. Thanks @derekszen!
 
 ## 0.13.0 — 2026-05-22
@@ -27,7 +28,7 @@
 
 ### Fixed
 
-- Browser: accept Cloudflare/throttling-blocked and plain 401/403 ChatGPT auth probes only when the signed-in app shell is visible, while keeping auth pages, login controls, and shells without profile/history signals authoritative. Builds on #216; thanks @orbitingflea and @hexsprite for the #241 reproduction and root-cause report!
+- Browser: accept Cloudflare/throttling-blocked ChatGPT auth probes only when the signed-in app shell is visible, while keeping plain 401/403 login failures authoritative. Thanks @orbitingflea!
 - Browser: resolve attachment readiness from the active ChatGPT composer so uploaded files do not false-fail with `attachment-send-not-ready` when the Send button is already clickable. Thanks @enieuwy!
 - Browser: scope ChatGPT model picker scans to the real picker menu while preserving text-only fallback rows, so sidebar/search Radix menus do not block model selection. Thanks @orbitingflea!
 - Browser: tolerate duplicate-renamed or ellipsized ChatGPT attachment chip names during pre-send readiness checks. Thanks @pdurlej!

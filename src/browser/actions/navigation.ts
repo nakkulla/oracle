@@ -208,7 +208,7 @@ export async function ensureLoggedIn(
   options: { appliedCookies?: number | null; remoteSession?: boolean } = {},
 ) {
   // Learned: ChatGPT can render the UI (project view) while auth silently failed.
-  // A backend-api probe plus DOM login CTA check catches both cases.
+  // Session state plus DOM login signals catch both valid and stale app shells.
   const outcome = await Runtime.evaluate({
     expression: buildLoginProbeExpression(LOGIN_CHECK_TIMEOUT_MS),
     awaitPromise: true,
@@ -217,7 +217,7 @@ export async function ensureLoggedIn(
   const probe = normalizeLoginProbe(outcome.result?.value);
   if (probe.ok) {
     logger(
-      `Login check passed (status=${probe.status}, domLoginCta=${Boolean(probe.domLoginCta)}, appAuthenticated=${Boolean(probe.appAuthenticated)})`,
+      `Login check passed (sessionStatus=${probe.status}, sessionAuthenticated=${Boolean(probe.sessionAuthenticated)}, backendStatus=${probe.backendStatus ?? "n/a"}, domLoginCta=${Boolean(probe.domLoginCta)}, appAuthenticated=${Boolean(probe.appAuthenticated)})`,
     );
     return;
   }
@@ -242,16 +242,22 @@ export async function ensureLoggedIn(
       return;
     }
     logger(
-      `Login retry after Welcome back failed (status=${retryProbe.status}, domLoginCta=${Boolean(
+      `Login retry after Welcome back failed (sessionStatus=${retryProbe.status}, sessionAuthenticated=${Boolean(
+        retryProbe.sessionAuthenticated,
+      )}, backendStatus=${retryProbe.backendStatus ?? "n/a"}, domLoginCta=${Boolean(
         retryProbe.domLoginCta,
       )}, appAuthenticated=${Boolean(retryProbe.appAuthenticated)})`,
     );
   }
 
   logger(
-    `Login probe failed (status=${probe.status}, domLoginCta=${Boolean(probe.domLoginCta)}, onAuthPage=${Boolean(
-      probe.onAuthPage,
-    )}, appAuthenticated=${Boolean(probe.appAuthenticated)}, cfBlocked=${Boolean(probe.cfBlocked)}, url=${probe.pageUrl ?? "n/a"}, error=${probe.error ?? "none"})`,
+    `Login probe failed (sessionStatus=${probe.status}, sessionAuthenticated=${Boolean(
+      probe.sessionAuthenticated,
+    )}, sessionResolved=${Boolean(probe.sessionResolved)}, backendStatus=${probe.backendStatus ?? "n/a"}, domLoginCta=${Boolean(
+      probe.domLoginCta,
+    )}, onAuthPage=${Boolean(probe.onAuthPage)}, appAuthenticated=${Boolean(
+      probe.appAuthenticated,
+    )}, cfBlocked=${Boolean(probe.cfBlocked)}, url=${probe.pageUrl ?? "n/a"}, error=${probe.error ?? "none"})`,
   );
 
   const domLabel = probe.domLoginCta ? " Login button detected on page." : "";
@@ -634,13 +640,16 @@ type LoginProbeResult = {
   domLoginCta?: boolean;
   onAuthPage?: boolean;
   appAuthenticated?: boolean;
+  backendStatus?: number | null;
   cfBlocked?: boolean;
+  sessionAuthenticated?: boolean;
+  sessionResolved?: boolean;
 };
 
 function buildLoginProbeExpression(timeoutMs: number): string {
   return `(async () => {
-    // Learned: /backend-api/me is the most reliable "am I logged in" signal.
-    // Some UIs render without a session; use DOM + network for a robust answer.
+    // /api/auth/session remains cookie-authenticated and exposes user presence without
+    // requiring the bearer token used by /backend-api/*. Never return or log its token.
     const pageUrl = typeof location === 'object' && location?.href ? location.href : null;
     const onAuthPage =
       typeof location === 'object' &&
@@ -711,6 +720,68 @@ function buildLoginProbeExpression(timeoutMs: number): string {
         (head.includes('<style global>') && head.includes('scale-appear'))
       );
     };
+    const readSessionDetail = async () => {
+      try {
+        if (typeof fetch !== 'function') {
+          return { status: 0, resolved: false, authenticated: false, cfBlocked: false, error: null };
+        }
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), ${timeoutMs});
+        try {
+          const response = await fetch('/api/auth/session', {
+            cache: 'no-store',
+            credentials: 'include',
+            signal: controller.signal,
+          });
+          let cfBlocked = false;
+          if (response.status === 403 || response.status === 503 || response.status === 429) {
+            try {
+              const text = await response.clone().text();
+              cfBlocked = isCloudflareBody(text);
+            } catch {}
+          }
+          if (response.status !== 200) {
+            return {
+              status: response.status || 0,
+              resolved: false,
+              authenticated: false,
+              cfBlocked,
+              error: null,
+            };
+          }
+          try {
+            const body = await response.json();
+            const resolved =
+              Boolean(body) && typeof body === 'object' && !Array.isArray(body);
+            return {
+              status: response.status || 0,
+              resolved,
+              authenticated: resolved && Boolean(body.user),
+              cfBlocked,
+              error: null,
+            };
+          } catch {
+            return {
+              status: response.status || 0,
+              resolved: false,
+              authenticated: false,
+              cfBlocked,
+              error: null,
+            };
+          }
+        } finally {
+          clearTimeout(timeout);
+        }
+      } catch (err) {
+        return {
+          status: 0,
+          resolved: false,
+          authenticated: false,
+          cfBlocked: false,
+          error: err ? String(err) : 'unknown',
+        };
+      }
+    };
     const readBackendDetail = async () => {
       try {
         if (typeof fetch !== 'function') return { status: 0, cfBlocked: false, error: null };
@@ -737,6 +808,15 @@ function buildLoginProbeExpression(timeoutMs: number): string {
         return { status: 0, cfBlocked: false, error: err ? String(err) : 'unknown' };
       }
     };
+    const readAuthDetail = async () => {
+      const session = await readSessionDetail();
+      const sessionDenied =
+        !session.cfBlocked && (session.status === 401 || session.status === 403);
+      if (session.resolved || sessionDenied) {
+        return { session, backend: null };
+      }
+      return { session, backend: await readBackendDetail() };
+    };
 
     const hasAppAuthSignal = () => {
       // Composer must be present and visible — the auth/login page never renders one.
@@ -762,40 +842,58 @@ function buildLoginProbeExpression(timeoutMs: number): string {
       return Boolean(profileButton || historyItem);
     };
 
-    let backend = await readBackendDetail();
-    let status = backend.status;
-    let cfBlocked = backend.cfBlocked;
-    let error = backend.error;
+    const classifyAuth = (auth, appSignal) => {
+      const sessionResolved = auth.session.status === 200 && auth.session.resolved;
+      const sessionDenied =
+        !auth.session.cfBlocked &&
+        (auth.session.status === 401 || auth.session.status === 403);
+      const sessionUnavailable = !sessionResolved && !sessionDenied;
+      const backendStatus = auth.backend ? auth.backend.status : null;
+      const backendUnavailable =
+        Boolean(auth.backend) &&
+        (auth.backend.cfBlocked ||
+          backendStatus === 0 ||
+          backendStatus === 401 ||
+          backendStatus === 403 ||
+          backendStatus === 429 ||
+          backendStatus === 503);
+      return {
+        authenticated:
+          auth.session.authenticated ||
+          (sessionUnavailable &&
+            (backendStatus === 200 || (backendUnavailable && appSignal))),
+        sessionResolved,
+        sessionUnavailable,
+      };
+    };
+
+    let auth = await readAuthDetail();
     let domLoginCta = hasLoginCta();
     let appAuthenticated = hasAppAuthSignal();
-    const isRetryableStatus = () =>
-      status === 0 || status === 401 || status === 403 || status === 503 || status === 429;
+    let classification = classifyAuth(auth, appAuthenticated);
     const settleDeadline = Date.now() + Math.min(${timeoutMs}, 2500);
-    while (!domLoginCta && status !== 200 && isRetryableStatus() && Date.now() < settleDeadline) {
+    while (
+      !domLoginCta &&
+      !classification.authenticated &&
+      classification.sessionUnavailable &&
+      Date.now() < settleDeadline
+    ) {
       await new Promise((resolve) => setTimeout(resolve, 100));
       domLoginCta = hasLoginCta();
       appAuthenticated = hasAppAuthSignal();
-      backend = await readBackendDetail();
-      status = backend.status;
-      cfBlocked = backend.cfBlocked;
-      error = backend.error;
+      auth = await readAuthDetail();
+      classification = classifyAuth(auth, appAuthenticated);
     }
 
     const loginSignals = domLoginCta || onAuthPage;
-    // Accept the SPA-level signal when the legacy cookie-only API probe is blocked,
-    // unavailable, or returns 401/403 but the DOM proves an authenticated shell.
-    // Auth pages and visible login controls remain authoritative failures.
-    const apiBlocked =
-      cfBlocked ||
-      status === 401 ||
-      status === 403 ||
-      status === 429 ||
-      status === 503 ||
-      status === 0;
-    const ok = !loginSignals && (status === 200 || (apiBlocked && appAuthenticated));
+    const backendStatus = auth.backend ? auth.backend.status : null;
+    const cfBlocked = auth.session.cfBlocked || Boolean(auth.backend?.cfBlocked);
+    const error = auth.session.error || auth.backend?.error || null;
+    const ok = !loginSignals && classification.authenticated;
     return {
       ok,
-      status,
+      status: auth.session.status,
+      backendStatus,
       redirected: false,
       url: pageUrl,
       pageUrl,
@@ -803,6 +901,8 @@ function buildLoginProbeExpression(timeoutMs: number): string {
       onAuthPage,
       appAuthenticated,
       cfBlocked,
+      sessionAuthenticated: auth.session.authenticated,
+      sessionResolved: classification.sessionResolved,
       error,
     };
   })()`;
@@ -831,7 +931,10 @@ function normalizeLoginProbe(raw: unknown): LoginProbeResult {
     domLoginCta: Boolean(value.domLoginCta),
     onAuthPage: Boolean(value.onAuthPage),
     appAuthenticated: Boolean(value.appAuthenticated),
+    backendStatus: typeof value.backendStatus === "number" ? value.backendStatus : null,
     cfBlocked: Boolean(value.cfBlocked),
+    sessionAuthenticated: Boolean(value.sessionAuthenticated),
+    sessionResolved: Boolean(value.sessionResolved),
   };
 }
 
