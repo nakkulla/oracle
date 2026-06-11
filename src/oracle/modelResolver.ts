@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import type { ModelConfig, ModelName, KnownModelName, TokenizerFn, ProModelName } from "./types.js";
 import { MODEL_CONFIGS, PRO_MODELS } from "./config.js";
-import { pricingFromUsdPerMillion } from "tokentally";
+import { pricingFromUsdPerToken } from "tokentally";
 
 const OPENROUTER_DEFAULT_BASE = "https://openrouter.ai/api/v1";
 const OPENROUTER_MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models";
@@ -57,8 +57,30 @@ interface OpenRouterModelInfo {
   id: string;
   context_length?: number;
   pricing?: {
-    prompt?: number;
-    completion?: number;
+    prompt?: string | number;
+    completion?: string | number;
+  };
+}
+
+function openRouterPricing(pricing: OpenRouterModelInfo["pricing"]): ModelConfig["pricing"] {
+  const parsePrice = (value: string | number | undefined): number | null => {
+    const parsed =
+      typeof value === "number"
+        ? value
+        : typeof value === "string" && value.trim() !== ""
+          ? Number(value)
+          : NaN;
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
+
+  const inputUsdPerToken = parsePrice(pricing?.prompt);
+  const outputUsdPerToken = parsePrice(pricing?.completion);
+  if (inputUsdPerToken === null || outputUsdPerToken === null) return null;
+
+  const normalized = pricingFromUsdPerToken({ inputUsdPerToken, outputUsdPerToken });
+  return {
+    inputPerToken: normalized.inputUsdPerToken,
+    outputPerToken: normalized.outputUsdPerToken,
   };
 }
 
@@ -167,19 +189,7 @@ export async function resolveModelConfig(
           openRouterId: targetId,
           provider: known?.provider ?? "other",
           inputLimit: info.context_length ?? known?.inputLimit ?? 200_000,
-          pricing:
-            info.pricing && info.pricing.prompt != null && info.pricing.completion != null
-              ? (() => {
-                  const pricing = pricingFromUsdPerMillion({
-                    inputUsdPerMillion: info.pricing.prompt,
-                    outputUsdPerMillion: info.pricing.completion,
-                  });
-                  return {
-                    inputPerToken: pricing.inputUsdPerToken,
-                    outputPerToken: pricing.outputUsdPerToken,
-                  };
-                })()
-              : (known?.pricing ?? null),
+          pricing: openRouterPricing(info.pricing) ?? known?.pricing ?? null,
           supportsBackground: known?.supportsBackground ?? true,
           supportsSearch: known?.supportsSearch ?? true,
         };
