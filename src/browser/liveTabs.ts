@@ -87,6 +87,22 @@ function trimToSnippet(text: string, max = 140): string {
   return `${normalized.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
 }
 
+function chooseBestAssistantText(options: {
+  snapshotText?: string | null;
+  inspectedText?: string | null;
+  markdownText?: string | null;
+}): string {
+  const candidates = [options.snapshotText, options.inspectedText, options.markdownText]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean);
+  if (candidates.length === 0) {
+    return "";
+  }
+  return candidates.reduce((best, candidate) => (candidate.length > best.length ? candidate : best));
+}
+
+export const chooseBestAssistantTextForTest = chooseBestAssistantText;
+
 function normalizeHostPort(input: HostPort = {}): Required<HostPort> {
   return {
     host: input.host ?? DEFAULT_REMOTE_CHROME_HOST,
@@ -290,10 +306,10 @@ export async function inspectChatGptTab(
       focused?: boolean;
     };
     const snapshot = await readAssistantSnapshot(Runtime).catch(() => null);
-    const lastAssistantText =
-      typeof snapshot?.text === "string" && snapshot.text.trim().length > 0
-        ? snapshot.text.trim()
-        : String(info.lastAssistantText ?? "").trim();
+    const lastAssistantText = chooseBestAssistantText({
+      snapshotText: snapshot?.text,
+      inspectedText: info.lastAssistantText,
+    });
     const lastUserText = String(info.lastUserText ?? "").trim();
     const summary: ChatGptTabSummary = {
       host,
@@ -472,11 +488,11 @@ export async function harvestChatGptTab(
         noopLogger,
       ).catch(() => null);
     }
-    const latestText =
-      typeof snapshot?.text === "string" && snapshot.text.trim().length > 0
-        ? snapshot.text.trim()
-        : resolved.lastAssistantText;
-    const lastAssistantText = latestText ?? "";
+    const lastAssistantText = chooseBestAssistantText({
+      snapshotText: snapshot?.text,
+      inspectedText: resolved.lastAssistantText,
+      markdownText: assistantMarkdown,
+    });
     const nowSummary = await inspectChatGptTab({
       host,
       port,

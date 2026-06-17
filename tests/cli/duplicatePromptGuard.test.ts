@@ -40,6 +40,38 @@ describe("shouldBlockDuplicatePrompt", () => {
     expect(log).toHaveBeenCalled();
   });
 
+  test("does not block a duplicate prompt when the matching browser session is harvestable and orphaned", async () => {
+    const log = vi.fn();
+    const store = makeStore([
+      {
+        mode: "browser",
+        options: { prompt: "same prompt" },
+        browser: {
+          runtime: {
+            controllerPid: 999_999_999,
+            tabUrl: "https://chatgpt.com/c/orphaned-session",
+            conversationId: "orphaned-session",
+            promptSubmitted: true,
+          },
+          harvest: {
+            state: "stalled",
+            lastAssistantSnippet: "Full answer is available for harvest.",
+          },
+        },
+      },
+    ]);
+
+    const blocked = await shouldBlockDuplicatePrompt({
+      prompt: "same prompt",
+      force: false,
+      sessionStore: store,
+      log,
+    });
+
+    expect(blocked).toBe(false);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("orphaned"));
+  });
+
   test("treats browser follow-ups as part of the duplicate signature", async () => {
     const store = makeStore([
       { options: { prompt: "same prompt", browserFollowUps: ["challenge it"] } },

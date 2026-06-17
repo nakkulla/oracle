@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  chooseBestAssistantTextForTest,
   classifyTabState,
   formatBrowserTabState,
   resolveChatGptTabFromSummariesForTest,
@@ -67,6 +68,25 @@ describe("liveTabs helpers", () => {
 
   test("formats the stored state when present", () => {
     expect(formatBrowserTabState(makeTab({ state: "stalled" }))).toBe("stalled");
+  });
+
+  test("prefers the full harvested snapshot over a one-token stale DOM read", () => {
+    const full = "Full recovered advisor answer. ".repeat(300).trim();
+
+    expect(
+      chooseBestAssistantTextForTest({
+        snapshotText: "I",
+        inspectedText: full,
+        markdownText: null,
+      }),
+    ).toBe(full);
+    expect(
+      chooseBestAssistantTextForTest({
+        snapshotText: full,
+        inspectedText: "I",
+        markdownText: null,
+      }),
+    ).toBe(full);
   });
 
   test("resolves current/id/url/title refs against live tabs", () => {

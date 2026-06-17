@@ -19,6 +19,7 @@ import { delay } from "../browser/utils.js";
 
 const LIVE_POLL_MS = 2000;
 const DEFAULT_STALL_THRESHOLD_MS = 60_000;
+const DEFAULT_HARVEST_STALL_WINDOW_MS = 3_000;
 const RECOVERY_HYDRATION_TIMEOUT_MS = 30_000;
 const RECOVERY_HYDRATION_POLL_MS = 1_000;
 
@@ -277,7 +278,7 @@ export async function harvestSessionBrowserOutput(
         host: initialEndpoint.host,
         port: initialEndpoint.port,
         ref,
-        stallWindowMs: options.stallWindowMs,
+        stallWindowMs: options.stallWindowMs ?? DEFAULT_HARVEST_STALL_WINDOW_MS,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -300,7 +301,7 @@ export async function harvestSessionBrowserOutput(
           host: recovered.host,
           port: recovered.port,
           ref: recovered.url,
-          stallWindowMs: options.stallWindowMs,
+          stallWindowMs: options.stallWindowMs ?? DEFAULT_HARVEST_STALL_WINDOW_MS,
         });
       harvested = await waitForRecoveredHarvestHydration(
         await harvestRecovered(),

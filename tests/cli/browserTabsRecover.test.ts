@@ -41,6 +41,63 @@ describe("harvestSessionBrowserOutput recovery fallback", () => {
     vi.resetModules();
   });
 
+  test("harvest waits for stale-stop stability before persisting stopped running sessions", async () => {
+    const fullAnswer = "Full advisor answer recovered from ChatGPT. ".repeat(220).trim();
+    const harvestChatGptTab = vi.fn(async (options: { stallWindowMs?: number }) => ({
+      ...completedHarvest,
+      stopExists: true,
+      state: options.stallWindowMs && options.stallWindowMs > 0 ? "stalled" : "running",
+      lastAssistantMarkdown: fullAnswer,
+      lastAssistantText: fullAnswer,
+      lastAssistantSnippet: "Full advisor answer recovered from ChatGPT.",
+    }));
+    const updateSession = vi.fn(async () => {});
+    const tmp = await import("node:os").then((os) => os.tmpdir());
+    const path = await import("node:path");
+    const fs = await import("node:fs/promises");
+    const outfile = path.join(tmp, `oracle-harvest-${Date.now()}-${Math.random()}.md`);
+
+    vi.doMock("../../src/browser/liveTabs.js", () => ({
+      collectChatGptTabs: vi.fn(),
+      DEFAULT_REMOTE_CHROME_HOST: "127.0.0.1",
+      DEFAULT_REMOTE_CHROME_PORT: 9222,
+      extractConversationIdFromUrl: () => "saved-conversation",
+      formatBrowserTabState: (tab: { state?: string }) => tab.state ?? "running",
+      harvestChatGptTab,
+      sessionMatchesTab: () => false,
+    }));
+    vi.doMock("../../src/browser/recoverConversation.js", () => ({
+      recoverConversationTab: vi.fn(),
+    }));
+    vi.doMock("../../src/sessionStore.js", () => ({
+      sessionStore: {
+        readSession: async () => ({ ...baseMeta, status: "running" }),
+        updateSession,
+        sessionsDir: () => path.join(tmp, "oracle-sessions"),
+      },
+    }));
+
+    const { harvestSessionBrowserOutput } = await import("../../src/cli/browserTabs.js");
+    await harvestSessionBrowserOutput("sess-recover", {
+      writeOutputPath: outfile,
+      quietOutput: true,
+    });
+
+    expect(harvestChatGptTab).toHaveBeenCalledWith(
+      expect.objectContaining({ stallWindowMs: expect.any(Number) }),
+    );
+    expect(await fs.readFile(outfile, "utf8")).toBe(fullAnswer);
+    expect(updateSession).toHaveBeenCalledWith(
+      "sess-recover",
+      expect.objectContaining({
+        browser: expect.objectContaining({
+          harvest: expect.objectContaining({ state: "stalled", stopExists: true }),
+        }),
+      }),
+    );
+    await fs.unlink(outfile).catch(() => undefined);
+  });
+
   test("retries via recoverConversationTab when initial harvest finds no live tab", async () => {
     const harvestChatGptTab = vi
       .fn()

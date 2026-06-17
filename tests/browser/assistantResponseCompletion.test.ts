@@ -26,10 +26,11 @@ function boolResult(value: boolean) {
   return { result: { value } };
 }
 
-// pollAssistantCompletion issues exactly three Runtime.evaluate kinds per cycle:
-//   1. snapshot read   -> expression embeds the extractAssistantTurn extractor
-//   2. completion probe -> expression references lastAssistantTurn
-//   3. stop-button probe -> expression queries [data-testid="stop-button"]
+// pollAssistantCompletion issues multiple Runtime.evaluate probes per cycle:
+//   1. snapshot read          -> expression embeds the extractAssistantTurn extractor
+//   2. completion probe       -> expression references lastAssistantTurn
+//   3. stop-button probe      -> expression queries [data-testid="stop-button"]
+//   4. active-thinking probe  -> expression references thinking/status selectors
 // The snapshot expression also mentions the stop selector, so it must be matched first.
 function buildRuntime(opts: {
   snapshotText: () => string;
@@ -88,6 +89,34 @@ describe("pollAssistantCompletion completion gating", () => {
       await vi.advanceTimersByTimeAsync(500);
       await promise;
       expect(resolvedValue).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("completes a long stable answer even when a stale stop button remains visible", async () => {
+    vi.useFakeTimers();
+    try {
+      const LONG =
+        "This is a sufficiently long stable assistant answer that is no longer changing. ".repeat(4).trim();
+      const runtime = buildRuntime({
+        snapshotText: () => LONG,
+        completionVisible: () => false,
+        stopVisible: () => true,
+      });
+
+      let resolved = false;
+      let resolvedValue: unknown = null;
+      const promise = pollAssistantCompletionForTest(runtime, 60_000).then((value) => {
+        resolved = true;
+        resolvedValue = value;
+        return value;
+      });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(resolved).toBe(true);
+      expect(resolvedValue).toMatchObject({ text: LONG });
+      await promise;
     } finally {
       vi.useRealTimers();
     }

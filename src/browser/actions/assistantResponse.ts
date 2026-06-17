@@ -545,9 +545,10 @@ async function pollAssistantCompletion(
       } else {
         stableCycles += 1;
       }
-      const [stopVisible, completionVisible] = await Promise.all([
+      const [stopVisible, completionVisible, activeThinkingVisible] = await Promise.all([
         isStopButtonVisible(Runtime),
         isCompletionVisible(Runtime),
+        isActiveThinkingVisible(Runtime),
       ]);
       if (isGeneratedImageAssistantAnswer(normalized)) {
         return normalized;
@@ -562,19 +563,22 @@ async function pollAssistantCompletion(
       const requiredStableCycles = shortAnswer ? 12 : mediumAnswer ? 8 : longAnswer ? 8 : 10;
       const stableMs = Date.now() - lastChangeAt;
       const minStableMs = shortAnswer ? 8000 : mediumAnswer ? 1200 : longAnswer ? 2000 : 3000;
-      // Require stop button to disappear before treating completion as final.
-      if (!stopVisible) {
-        // Very short visible text is unreliable on stability alone: reasoning models
-        // (ChatGPT Pro Extended) leave the first token frozen for minutes while reasoning
-        // happens off-DOM. Require a positive completion signal for short answers; only
-        // longer answers may complete on stability alone.
-        const stableEnough =
-          !shortAnswer && stableCycles >= requiredStableCycles && stableMs >= minStableMs;
-        const completionEnough =
-          completionVisible && stableCycles >= completionStableTarget && stableMs >= minStableMs;
-        if (completionEnough || stableEnough) {
-          return normalized;
-        }
+      // Very short visible text is unreliable on stability alone: reasoning models
+      // (ChatGPT Pro Extended) leave the first token frozen for minutes while reasoning
+      // happens off-DOM. Require a positive completion signal for short answers; only
+      // longer answers may complete on stability alone.
+      const stableEnough =
+        !shortAnswer && stableCycles >= requiredStableCycles && stableMs >= minStableMs;
+      const completionEnough =
+        completionVisible && stableCycles >= completionStableTarget && stableMs >= minStableMs;
+      const staleStopStableEnough =
+        stopVisible &&
+        !activeThinkingVisible &&
+        currentLength >= 160 &&
+        stableCycles >= 12 &&
+        stableMs >= 8_000;
+      if ((!stopVisible && (completionEnough || stableEnough)) || staleStopStableEnough) {
+        return normalized;
       }
     } else {
       previousLength = 0;
@@ -635,6 +639,30 @@ async function isCompletionVisible(Runtime: ChromeClient["Runtime"]): Promise<bo
         // Also check for "Done" text in the last assistant turn's markdown
         const markdowns = lastAssistantTurn.querySelectorAll('.markdown');
         return Array.from(markdowns).some((n) => (n.textContent || '').trim() === 'Done');
+      })()`,
+      returnByValue: true,
+    });
+    return Boolean(result?.value);
+  } catch {
+    return false;
+  }
+}
+
+async function isActiveThinkingVisible(Runtime: ChromeClient["Runtime"]): Promise<boolean> {
+  try {
+    const { result } = await Runtime.evaluate({
+      expression: `(() => {
+        const labels = ${JSON.stringify(THINKING_STATUS_LABELS)};
+        const normalize = (value) => String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const matchesThinking = (value) => {
+          const normalized = normalize(value);
+          if (!normalized) return false;
+          if (labels.includes(normalized)) return true;
+          if (normalized.startsWith('thought for ') && normalized.length <= 40) return true;
+          return normalized.startsWith('pro thinking') && normalized.length <= 40;
+        };
+        const statusNodes = Array.from(document.querySelectorAll('[role="status"], [aria-live], [data-testid*="thinking"], [data-testid*="status"], .markdown'));
+        return statusNodes.some((node) => matchesThinking(node.textContent || node.getAttribute?.('aria-label') || ''));
       })()`,
       returnByValue: true,
     });
