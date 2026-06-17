@@ -15,9 +15,12 @@ import {
 } from "../browser/liveTabs.js";
 import { recoverConversationTab } from "../browser/recoverConversation.js";
 import { resolveOutputPath } from "./writeOutputPath.js";
+import { delay } from "../browser/utils.js";
 
 const LIVE_POLL_MS = 2000;
 const DEFAULT_STALL_THRESHOLD_MS = 60_000;
+const RECOVERY_HYDRATION_TIMEOUT_MS = 30_000;
+const RECOVERY_HYDRATION_POLL_MS = 1_000;
 
 export interface BrowserHarvestOptions {
   writeOutputPath?: string;
@@ -153,6 +156,31 @@ async function persistHarvest(
   await sessionStore.updateSession(sessionId, { browser });
 }
 
+function hasAssistantOutput(harvested: ChatGptTabSummary): boolean {
+  return Boolean(
+    String(harvested.lastAssistantMarkdown ?? harvested.lastAssistantText ?? "").trim(),
+  );
+}
+
+async function waitForRecoveredHarvestHydration(
+  initial: ChatGptTabSummary,
+  harvestOnce: () => Promise<ChatGptTabSummary>,
+): Promise<ChatGptTabSummary> {
+  if (hasAssistantOutput(initial)) {
+    return initial;
+  }
+  const deadline = Date.now() + RECOVERY_HYDRATION_TIMEOUT_MS;
+  let latest = initial;
+  while (Date.now() < deadline) {
+    await delay(RECOVERY_HYDRATION_POLL_MS);
+    latest = await harvestOnce();
+    if (hasAssistantOutput(latest)) {
+      return latest;
+    }
+  }
+  return latest;
+}
+
 function printHarvestSummary(sessionId: string, harvested: ChatGptTabSummary): void {
   console.log(chalk.bold(`Session: ${sessionId}`));
   console.log(`Target: ${harvested.targetId}`);
@@ -267,12 +295,17 @@ export async function harvestSessionBrowserOutput(
       );
       const recovered = await recoverConversationTab(meta, (line) => console.log(line));
       recoveredChrome = recovered.chrome;
-      harvested = await harvestChatGptTab({
-        host: recovered.host,
-        port: recovered.port,
-        ref: recovered.url,
-        stallWindowMs: options.stallWindowMs,
-      });
+      const harvestRecovered = () =>
+        harvestChatGptTab({
+          host: recovered.host,
+          port: recovered.port,
+          ref: recovered.url,
+          stallWindowMs: options.stallWindowMs,
+        });
+      harvested = await waitForRecoveredHarvestHydration(
+        await harvestRecovered(),
+        harvestRecovered,
+      );
     }
 
     await persistHarvest(sessionId, meta, harvested);

@@ -97,6 +97,67 @@ describe("harvestSessionBrowserOutput recovery fallback", () => {
     expect(fakeChrome.kill).not.toHaveBeenCalled();
   });
 
+  test("waits for recovered conversation hydration before accepting empty harvest", async () => {
+    vi.useFakeTimers();
+    try {
+      const emptyHydratingHarvest = {
+        targetId: "target-x",
+        url: "https://chatgpt.com/c/saved-conversation",
+        conversationId: "saved-conversation",
+        state: "completed",
+        authenticated: true,
+        stopExists: false,
+        sendExists: true,
+        assistantCount: 0,
+        currentModelLabel: "Pro Extended",
+        lastAssistantMarkdown: null,
+        lastAssistantText: "",
+        lastAssistantSnippet: "",
+        lastUserSnippet: "",
+      } as const;
+      const harvestChatGptTab = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("No ChatGPT tab matched"))
+        .mockResolvedValueOnce(emptyHydratingHarvest)
+        .mockResolvedValueOnce(completedHarvest);
+      const fakeChrome = { kill: vi.fn() };
+      vi.doMock("../../src/browser/liveTabs.js", () => ({
+        collectChatGptTabs: vi.fn(),
+        DEFAULT_REMOTE_CHROME_HOST: "127.0.0.1",
+        DEFAULT_REMOTE_CHROME_PORT: 9222,
+        extractConversationIdFromUrl: () => "saved-conversation",
+        formatBrowserTabState: () => "completed",
+        harvestChatGptTab,
+        sessionMatchesTab: () => false,
+      }));
+      vi.doMock("../../src/browser/recoverConversation.js", () => ({
+        recoverConversationTab: vi.fn(async () => ({
+          host: "127.0.0.1",
+          port: 53777,
+          url: "https://chatgpt.com/c/saved-conversation",
+          chrome: fakeChrome,
+        })),
+      }));
+      vi.doMock("../../src/sessionStore.js", () => ({
+        sessionStore: { readSession: async () => baseMeta, updateSession: async () => {} },
+      }));
+
+      const { harvestSessionBrowserOutput } = await import("../../src/cli/browserTabs.js");
+      const promise = harvestSessionBrowserOutput("sess-recover", {
+        closeAfterRecover: true,
+        quietOutput: true,
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(promise).resolves.toMatchObject({
+        lastAssistantText: completedHarvest.lastAssistantText,
+      });
+      expect(harvestChatGptTab).toHaveBeenCalledTimes(3);
+      expect(fakeChrome.kill).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("does not recover when recoverIfMissing is false; surfaces the original error", async () => {
     const harvestChatGptTab = vi
       .fn()
