@@ -527,7 +527,12 @@ async function pollAssistantCompletion(
       const minStableMs = shortAnswer ? 8000 : mediumAnswer ? 1200 : longAnswer ? 2000 : 3000;
       // Require stop button to disappear before treating completion as final.
       if (!stopVisible) {
-        const stableEnough = stableCycles >= requiredStableCycles && stableMs >= minStableMs;
+        // Very short visible text is unreliable on stability alone: reasoning models
+        // (ChatGPT Pro Extended) leave the first token frozen for minutes while reasoning
+        // happens off-DOM. Require a positive completion signal for short answers; only
+        // longer answers may complete on stability alone.
+        const stableEnough =
+          !shortAnswer && stableCycles >= requiredStableCycles && stableMs >= minStableMs;
         const completionEnough =
           completionVisible && stableCycles >= completionStableTarget && stableMs >= minStableMs;
         if (completionEnough || stableEnough) {
@@ -542,6 +547,8 @@ async function pollAssistantCompletion(
   }
   return null;
 }
+
+export const pollAssistantCompletionForTest = pollAssistantCompletion;
 
 async function isStopButtonVisible(Runtime: ChromeClient["Runtime"]): Promise<boolean> {
   try {
