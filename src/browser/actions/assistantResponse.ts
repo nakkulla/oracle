@@ -57,6 +57,16 @@ function isAnswerNowPlaceholderText(normalized: string): boolean {
   );
 }
 
+function isShortUnverifiedAssistantAnswer(
+  answer: { text?: string; html?: string } | null,
+): boolean {
+  if (!answer || isGeneratedImageAssistantAnswer(answer)) {
+    return false;
+  }
+  const length = cleanAssistantText(answer.text ?? "").trim().length;
+  return length > 0 && length < 16;
+}
+
 function buildActiveThinkingStatusPredicateJs(fnName: string): string {
   const labelsLiteral = JSON.stringify(THINKING_STATUS_LABELS);
   const stopSelectorLiteral = JSON.stringify(STOP_BUTTON_SELECTOR);
@@ -227,11 +237,14 @@ export async function waitForAssistantResponse(
   // The evaluation path can race ahead of completion. If ChatGPT is still streaming, wait for the watchdog poller.
   const elapsedMs = Date.now() - start;
   const remainingMs = Math.max(0, timeoutMs - elapsedMs);
+  let completionVisible = false;
+  const shortUnverifiedAnswer = isShortUnverifiedAssistantAnswer(candidate);
   if (remainingMs > 0) {
-    const [stopVisible, completionVisible] = await Promise.all([
+    const [stopVisible, visibleCompletion] = await Promise.all([
       isStopButtonVisible(Runtime),
       isCompletionVisible(Runtime),
     ]);
+    completionVisible = visibleCompletion;
     if (stopVisible) {
       logger("Assistant still generating; waiting for completion");
       const completed = await pollAssistantCompletion(
@@ -245,7 +258,25 @@ export async function waitForAssistantResponse(
       }
     } else if (completionVisible) {
       // No-op: completion UI surfaced and stop button is gone.
+    } else if (shortUnverifiedAnswer) {
+      logger(
+        "Assistant response is a short partial without completion signal; waiting for completion",
+      );
+      const completed = await pollAssistantCompletion(
+        Runtime,
+        remainingMs,
+        minTurnIndex,
+        expectedConversationId,
+      );
+      if (completed) {
+        return completed;
+      }
     }
+  }
+
+  if (shortUnverifiedAnswer && !completionVisible) {
+    await logDomFailure(Runtime, logger, "assistant-response-incomplete");
+    throw new Error("Assistant response incomplete before timeout");
   }
 
   return candidate;
@@ -341,17 +372,23 @@ async function recoverAssistantResponse(
   if (recoveryTimeoutMs === 0) {
     return null;
   }
-  const recovered = await waitForCondition(
-    async () => {
-      const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex, expectedConversationId);
-      return normalizeAssistantSnapshot(snapshot);
-    },
+  const recovered = await pollAssistantCompletion(
+    Runtime,
     recoveryTimeoutMs,
-    400,
+    minTurnIndex,
+    expectedConversationId,
   );
   if (recovered) {
-    logger("Recovered assistant response via polling fallback");
+    logger("Recovered assistant response via completion-gated polling fallback");
     return recovered;
+  }
+  const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex, expectedConversationId).catch(
+    () => null,
+  );
+  const normalized = normalizeAssistantSnapshot(snapshot);
+  if (normalized && !isShortUnverifiedAssistantAnswer(normalized)) {
+    logger("Recovered assistant response via non-short snapshot fallback");
+    return normalized;
   }
   await logConversationSnapshot(Runtime, logger).catch(() => undefined);
   return null;
@@ -635,22 +672,6 @@ function normalizeAssistantSnapshot(snapshot: AssistantSnapshot | null): {
 
 function isGeneratedImageAssistantAnswer(answer: { html?: string } | null): boolean {
   return Boolean(answer?.html?.includes("/backend-api/estuary/content?id=file_"));
-}
-
-async function waitForCondition<T>(
-  getter: () => Promise<T | null>,
-  timeoutMs: number,
-  pollIntervalMs = 400,
-): Promise<T | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await getter();
-    if (value) {
-      return value;
-    }
-    await delay(pollIntervalMs);
-  }
-  return null;
 }
 
 function buildAssistantSnapshotExpression(
@@ -972,10 +993,15 @@ function buildResponseObserverExpression(
 function buildAssistantExtractor(functionName: string): string {
   const conversationLiteral = JSON.stringify(CONVERSATION_TURN_SELECTOR);
   const assistantLiteral = JSON.stringify(ASSISTANT_ROLE_SELECTOR);
+  const finishedActionsLiteral = JSON.stringify(FINISHED_ACTIONS_SELECTOR);
+  const thinkingLabelsLiteral = JSON.stringify(THINKING_STATUS_LABELS);
   return `const ${functionName} = () => {
     ${buildClickDispatcher()}
     const CONVERSATION_SELECTOR = ${conversationLiteral};
     const ASSISTANT_SELECTOR = ${assistantLiteral};
+    const FINISHED_SELECTOR = ${finishedActionsLiteral};
+    const THINKING_LABELS = ${thinkingLabelsLiteral};
+    const MIN_EXTRACT_TURN_INDEX = typeof MIN_TURN_INDEX === 'number' ? MIN_TURN_INDEX : -1;
     const isAssistantTurn = (node) => {
       if (!(node instanceof HTMLElement)) return false;
       const turnAttr = (node.getAttribute('data-turn') || node.dataset?.turn || '').toLowerCase();
@@ -1010,8 +1036,35 @@ function buildAssistantExtractor(functionName: string): string {
       }
     };
 
+    const normalizeText = (value) => String(value || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    const isPlaceholderLikeText = (value) => {
+      const normalized = normalizeText(value);
+      if (!normalized) return true;
+      if (normalized === 'chatgpt said:' || normalized === 'chatgpt said') return true;
+      if (normalized.includes('file upload request') && (normalized.includes('pro thinking') || normalized.includes('chatgpt said'))) {
+        return true;
+      }
+      if (normalized.includes('answer now') && (normalized.includes('pro thinking') || normalized.includes('chatgpt said'))) {
+        return true;
+      }
+      if (THINKING_LABELS.includes(normalized)) return true;
+      if (normalized.startsWith('thought for ') && normalized.length <= 40) return true;
+      return normalized.startsWith('pro thinking') && normalized.length <= 40;
+    };
+    const stripCandidate = (candidate) => ({
+      text: candidate.text,
+      html: candidate.html,
+      messageId: candidate.messageId,
+      turnId: candidate.turnId,
+      turnIndex: candidate.turnIndex,
+    });
+
     const turns = Array.from(document.querySelectorAll(CONVERSATION_SELECTOR));
+    const candidates = [];
     for (let index = turns.length - 1; index >= 0; index -= 1) {
+      if (MIN_EXTRACT_TURN_INDEX >= 0 && index < MIN_EXTRACT_TURN_INDEX) {
+        continue;
+      }
       const turn = turns[index];
       if (!isAssistantTurn(turn)) {
         continue;
@@ -1039,22 +1092,52 @@ function buildAssistantExtractor(functionName: string): string {
       const generatedImages = Array.from(messageRoot.querySelectorAll('img')).filter((img) =>
         String(img?.src || '').includes('/backend-api/estuary/content?id=file_')
       );
-      const normalizedText = String(text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+      const normalizedText = normalizeText(text);
       const imageOnlyChrome =
         !normalizedText ||
         normalizedText === 'edit' ||
         normalizedText === 'stopped thinking' ||
         normalizedText === 'stopped thinking edit' ||
         /^thought for \\d+(?:\\.\\d+)?\\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)\\s+edit$/.test(normalizedText);
+      const finished =
+        Boolean(turn.querySelector(FINISHED_SELECTOR)) ||
+        Array.from(turn.querySelectorAll('.markdown')).some((n) => (n.textContent || '').trim() === 'Done');
       if (generatedImages.length > 0 && imageOnlyChrome) {
-        const label = generatedImages.length === 1 ? 'Generated image.' : \`Generated \${generatedImages.length} images.\`;
-        return { text: label, html: messageRoot?.innerHTML ?? html, messageId, turnId, turnIndex: index };
+        const label = generatedImages.length === 1 ? 'Generated image.' : 'Generated ' + generatedImages.length + ' images.';
+        candidates.push({
+          text: label,
+          html: messageRoot?.innerHTML ?? html,
+          messageId,
+          turnId,
+          turnIndex: index,
+          finished: true,
+          textLength: label.length,
+          generatedImage: true,
+        });
+        continue;
       }
-      if (text.trim()) {
-        return { text, html, messageId, turnId, turnIndex: index };
+      if (text.trim() && !isPlaceholderLikeText(text)) {
+        candidates.push({
+          text,
+          html,
+          messageId,
+          turnId,
+          turnIndex: index,
+          finished,
+          textLength: text.trim().length,
+          generatedImage: false,
+        });
       }
     }
-    return null;
+    const generated = candidates.find((candidate) => candidate.generatedImage);
+    if (generated) return stripCandidate(generated);
+    const finishedLong = candidates.find((candidate) => candidate.finished && candidate.textLength >= 16);
+    if (finishedLong) return stripCandidate(finishedLong);
+    const longCandidate = candidates.find((candidate) => candidate.textLength >= 16);
+    if (longCandidate) return stripCandidate(longCandidate);
+    const finishedAny = candidates.find((candidate) => candidate.finished);
+    if (finishedAny) return stripCandidate(finishedAny);
+    return candidates[0] ? stripCandidate(candidates[0]) : null;
   };`;
 }
 

@@ -181,6 +181,7 @@ export async function handleSessionCommand(
         writeOutputPath,
         browserTabRef,
         recoverIfMissing,
+        closeAfterRecover: true,
       });
       return;
     }

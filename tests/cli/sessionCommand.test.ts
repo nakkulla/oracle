@@ -213,6 +213,7 @@ describe("handleSessionCommand", () => {
       writeOutputPath: "/tmp/out.md",
       browserTabRef: "current",
       recoverIfMissing: true,
+      closeAfterRecover: true,
     });
     expect(deps.liveTailSessionBrowserOutput).not.toHaveBeenCalled();
   });

@@ -847,7 +847,12 @@ describe("waitForAssistantResponse", () => {
     vi.useFakeTimers();
     try {
       let snapshotCalls = 0;
-      const payload = { text: "Answer", html: "<p>Answer</p>", messageId: "mid", turnId: "tid" };
+      const payload = {
+        text: "Complete answer payload.",
+        html: "<p>Complete answer payload.</p>",
+        messageId: "mid",
+        turnId: "tid",
+      };
       const evaluate = vi
         .fn()
         .mockImplementation(async (params: { expression?: string; awaitPromise?: boolean }) => {
@@ -870,7 +875,7 @@ describe("waitForAssistantResponse", () => {
       const promise = waitForAssistantResponse(runtime, 30_000, logger);
       await vi.advanceTimersByTimeAsync(2_000);
       const result = await promise;
-      expect(result.text).toBe("Answer");
+      expect(result.text).toBe("Complete answer payload.");
 
       const callsAtReturn = evaluate.mock.calls.length;
       await vi.advanceTimersByTimeAsync(5_000);
@@ -917,8 +922,8 @@ describe("waitForAssistantResponse", () => {
           return {
             result: {
               value: {
-                text: "Recovered",
-                html: "<p>Recovered</p>",
+                text: "Recovered complete answer.",
+                html: "<p>Recovered complete answer.</p>",
                 messageId: "mid",
                 turnId: "tid",
               },
@@ -929,7 +934,7 @@ describe("waitForAssistantResponse", () => {
       });
     const runtime = { evaluate } as unknown as ChromeClient["Runtime"];
     const result = await waitForAssistantResponse(runtime, 200, logger);
-    expect(result.text).toBe("Recovered");
+    expect(result.text).toBe("Recovered complete answer.");
     expect(evaluate).toHaveBeenCalled();
   });
 });
@@ -1596,6 +1601,55 @@ describe("uploadAttachmentFile", () => {
 
     expect(dom.querySelector).toHaveBeenCalledTimes(1);
     expect(dom.setFileInputFiles).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("waitForAssistantResponse", () => {
+  function resultWithText(text: string) {
+    return {
+      result: {
+        type: "object",
+        value: { text, html: "", messageId: "mid", turnId: "tid", turnIndex: 0 },
+      },
+    };
+  }
+
+  function resultBool(value: boolean) {
+    return { result: { value } };
+  }
+
+  test("continues polling when observer captures a short partial without completion", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.now();
+      const longAnswer = "This is the completed answer captured after the short partial.";
+      const runtime = {
+        evaluate: vi.fn(async (params: { expression?: string }) => {
+          const expr = String(params?.expression ?? "");
+          const elapsedMs = Date.now() - startedAt;
+          if (expr.includes("MutationObserver")) {
+            return resultWithText("I");
+          }
+          if (expr.includes("extractAssistantTurn")) {
+            return resultWithText(elapsedMs < 6_000 ? "I" : longAnswer);
+          }
+          if (expr.includes("lastAssistantTurn")) {
+            return resultBool(elapsedMs >= 6_000);
+          }
+          if (expr.includes("stop-button")) {
+            return resultBool(false);
+          }
+          return resultBool(false);
+        }),
+        terminateExecution: vi.fn(async () => undefined),
+      } as unknown as ChromeClient["Runtime"];
+
+      const promise = waitForAssistantResponse(runtime, 20_000, logger);
+      await vi.advanceTimersByTimeAsync(12_000);
+      await expect(promise).resolves.toMatchObject({ text: longAnswer });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

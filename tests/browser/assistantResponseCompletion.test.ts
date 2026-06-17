@@ -1,5 +1,8 @@
 import { describe, expect, test, vi } from "vitest";
-import { pollAssistantCompletionForTest } from "../../src/browser/actions/assistantResponse.js";
+import {
+  pollAssistantCompletionForTest,
+  waitForAssistantResponse,
+} from "../../src/browser/actions/assistantResponse.js";
 import type { ChromeClient } from "../../src/browser/types.js";
 
 // Regression coverage for the ChatGPT "Pro Extended" early-capture bug: a reasoning
@@ -13,6 +16,7 @@ type EvalParams = { expression?: string; returnByValue?: boolean };
 function snapshotResult(text: string) {
   return {
     result: {
+      type: "object",
       value: { text, html: "", messageId: "mid", turnId: "tid", turnIndex: 0 },
     },
   };
@@ -124,6 +128,74 @@ describe("pollAssistantCompletion completion gating", () => {
       const promise = pollAssistantCompletionForTest(runtime, 60_000);
       await vi.advanceTimersByTimeAsync(15_000);
       await expect(promise).resolves.toMatchObject({ text: "OK" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+function buildEvaluationRuntime(opts: {
+  evaluationText: string;
+  snapshotText: (elapsedMs: number) => string;
+  completionVisible: (elapsedMs: number) => boolean;
+  stopVisible?: (elapsedMs: number) => boolean;
+}): ChromeClient["Runtime"] {
+  const startedAt = Date.now();
+  const stopVisible = opts.stopVisible ?? (() => false);
+  return {
+    evaluate: vi.fn(async (params: EvalParams) => {
+      const expr = String(params?.expression ?? "");
+      const elapsedMs = Date.now() - startedAt;
+      if (expr.includes("MutationObserver")) {
+        return snapshotResult(opts.evaluationText);
+      }
+      if (expr.includes("extractAssistantTurn")) {
+        return snapshotResult(opts.snapshotText(elapsedMs));
+      }
+      if (expr.includes("lastAssistantTurn")) {
+        return boolResult(opts.completionVisible(elapsedMs));
+      }
+      if (expr.includes("stop-button")) {
+        return boolResult(stopVisible(elapsedMs));
+      }
+      return boolResult(false);
+    }),
+    terminateExecution: vi.fn(async () => undefined),
+  } as unknown as ChromeClient["Runtime"];
+}
+
+describe("waitForAssistantResponse evaluation completion gating", () => {
+  test("does not return a 1-char evaluation result before a completion signal", async () => {
+    vi.useFakeTimers();
+    try {
+      const longAnswer = "This is the completed assistant answer after Pro reasoning finishes.";
+      const runtime = buildEvaluationRuntime({
+        evaluationText: "I",
+        snapshotText: (elapsedMs) => (elapsedMs < 6_000 ? "I" : longAnswer),
+        completionVisible: (elapsedMs) => elapsedMs >= 6_000,
+      });
+
+      const promise = waitForAssistantResponse(runtime, 20_000, () => undefined);
+      await vi.advanceTimersByTimeAsync(12_000);
+      await expect(promise).resolves.toMatchObject({ text: longAnswer });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("rejects instead of completing when timeout leaves only a short partial", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = buildEvaluationRuntime({
+        evaluationText: "I",
+        snapshotText: () => "I",
+        completionVisible: () => false,
+      });
+
+      const promise = waitForAssistantResponse(runtime, 2_500, () => undefined);
+      const assertion = expect(promise).rejects.toThrow(/assistant response|capture|timeout/i);
+      await vi.advanceTimersByTimeAsync(3_000);
+      await assertion;
     } finally {
       vi.useRealTimers();
     }

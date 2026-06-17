@@ -27,6 +27,15 @@ describe("browser automation expressions", () => {
     expect(expression).toContain("thought for");
   });
 
+  test("assistant extractor prioritizes finished long answers over short placeholders", () => {
+    const expression = buildAssistantExtractorForTest("capture");
+    expect(expression).toContain("const candidates = []");
+    expect(expression).toContain("isPlaceholderLikeText");
+    expect(expression).toContain("MIN_EXTRACT_TURN_INDEX");
+    expect(expression).toContain("candidate.finished && candidate.textLength >= 16");
+    expect(expression).toContain("THINKING_LABELS.includes(normalized)");
+  });
+
   test("conversation debug expression references conversation selector", () => {
     const expression = buildConversationDebugExpressionForTest();
     expect(expression).toContain(JSON.stringify(CONVERSATION_TURN_SELECTOR));
